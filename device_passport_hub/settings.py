@@ -10,7 +10,7 @@ SECRET_KEY = 'django-insecure-z28d9^98azv9ov8@tmc(6ycuy!yexmv$=42n&!*27hs(c0*u&x
 DEBUG = True
 
 # FINAL FIX: Allows connection from the Kali VM (192.168.1.7)
-ALLOWED_HOSTS = ['*'] 
+ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '10.63.80.74','10.80.40.226'] 
 
 
 # Application definition

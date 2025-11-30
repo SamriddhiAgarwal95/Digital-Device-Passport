@@ -31,7 +31,7 @@ except Exception:
 
 # Optional tooltip package (safe fallback)
 try:
-    import tktooltip
+    from TkToolTip import ToolTip
     TOOLTIP_AVAILABLE = True
 except Exception:
     TOOLTIP_AVAILABLE = False

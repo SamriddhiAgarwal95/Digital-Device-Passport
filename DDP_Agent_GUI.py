@@ -1,12 +1,9 @@
 # DDP_Agent_GUI_pretty.py
 """
 Enhanced Digital Device Passport Wipe Agent (UI-upgraded)
-- NOTE: Core backend logic (deletion, wipe simulation, certificate creation, cloud mint)
-  is intentionally left unchanged from your supplied code. Only UI/UX is enhanced.
-- Full-screen at startup, improved layout, search/select UI for folder list,
-  improved log controls, nicer progress visuals, and a status banner.
+- Core UI/UX preserved. This version adds a cross-platform deletion engine so Linux
+  actually removes files like Windows did previously.
 """
-
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
@@ -21,6 +18,7 @@ import sys
 import socket
 import psutil
 import subprocess
+import shutil
 
 # Optional enhancements
 try:
@@ -144,7 +142,97 @@ class Logger:
     def error(self, msg): self._write(msg, "ERROR")
 
 # -------------------------------
-# Wipe Worker Thread (unchanged)
+# Deletion helpers (NEW: cross-platform deletion of folder *contents*)
+# -------------------------------
+def delete_contents_cross_platform(target_path, logger, timeout_seconds=60):
+    """
+    Deletes the *contents* of target_path (not the parent folder itself) in a
+    cross-platform manner. Returns (success: bool, message: str).
+    - On Windows: uses PowerShell Remove-Item for parity with prior behavior.
+    - On Unix-like: uses shutil/os to remove files and directories under the target path.
+    """
+    try:
+        if not os.path.exists(target_path):
+            return True, "Target not found (harmless)."
+
+        # If target is a file, remove it
+        if os.path.isfile(target_path) or os.path.islink(target_path):
+            try:
+                os.remove(target_path)
+                return True, f"Removed file: {target_path}"
+            except PermissionError:
+                return False, "Permission denied"
+            except Exception as e:
+                return False, f"File deletion error: {e}"
+
+        # If target is a directory: delete its contents (like shell 'rm -rf /path/*')
+        os_name = platform.system()
+        if os_name == "Windows":
+            # Use PowerShell Remove-Item on the contents (preserve the parent folder)
+            # Build path to contents (append \*). Use single quotes inside command to handle spaces.
+            contents = os.path.join(target_path, '*')
+            cmd = f"powershell.exe -ExecutionPolicy Bypass -Command \"& {{Remove-Item -Path '{contents}' -Force -Recurse -ErrorAction SilentlyContinue}}\""
+            try:
+                proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_seconds)
+                if proc.returncode != 0:
+                    out = (proc.stdout or "") + (proc.stderr or "")
+                    # Interpret typical "no such file" as harmless
+                    if "cannot find" in out.lower() or "not found" in out.lower():
+                        return True, "No contents to delete."
+                    if "access is denied" in out.lower():
+                        return False, "Access denied"
+                    return False, f"PowerShell returned code {proc.returncode}"
+                return True, "Windows deletion succeeded"
+            except subprocess.TimeoutExpired:
+                return False, "Deletion timed out"
+            except Exception as e:
+                return False, f"PowerShell deletion error: {e}"
+        else:
+            # Unix-like: remove contents by iterating entries
+            try:
+                entries = os.listdir(target_path)
+            except PermissionError:
+                return False, "Permission denied listing directory"
+            except Exception as e:
+                return False, f"Listing error: {e}"
+
+            any_fail = False
+            messages = []
+            for entry in entries:
+                full = os.path.join(target_path, entry)
+                try:
+                    if os.path.islink(full) or os.path.isfile(full):
+                        os.remove(full)
+                        messages.append(f"Removed file: {full}")
+                    elif os.path.isdir(full):
+                        shutil.rmtree(full)
+                        messages.append(f"Removed dir: {full}")
+                    else:
+                        # unknown type - try unlink
+                        try:
+                            os.remove(full)
+                            messages.append(f"Removed unknown: {full}")
+                        except Exception:
+                            any_fail = True
+                            messages.append(f"Failed to remove unknown: {full}")
+                except PermissionError:
+                    any_fail = True
+                    messages.append(f"Permission denied: {full}")
+                except FileNotFoundError:
+                    # Already removed by race condition, ok
+                    pass
+                except Exception as e:
+                    any_fail = True
+                    messages.append(f"Error removing {full}: {e}")
+
+            if any_fail:
+                return False, "; ".join(messages[:5])
+            return True, "; ".join(messages[:5] if messages else ["No contents to delete"])
+    except Exception as e:
+        return False, f"Unexpected deletion error: {e}"
+
+# -------------------------------
+# Wipe Worker Thread (unchanged behavior for wipe simulation)
 # -------------------------------
 class WipeWorker(threading.Thread):
     def __init__(self, progress_callback, log_callback, done_callback, cancel_event, config):
@@ -210,7 +298,14 @@ class DDPWipeAgentApp(tk.Tk):
         super().__init__()
         self.title("DDP Secure Wipe Agent — Execution Ready")
         # Start full screen (user requested fullscreen)
-        self.state('zoomed') if platform.system() == "Windows" else self.attributes("-zoomed", True)
+        try:
+            self.state('zoomed') if platform.system() == "Windows" else self.attributes("-zoomed", True)
+        except Exception:
+            # fallback: maximize
+            try:
+                self.attributes("-fullscreen", True)
+            except Exception:
+                pass
         self.configure(bg="#0f1724")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -268,7 +363,10 @@ class DDPWipeAgentApp(tk.Tk):
         style.configure("Card.TFrame", background="#0b1220", relief="flat")
 
         # Progressbar style
-        style.theme_use(style.theme_use() or "default")
+        try:
+            style.theme_use(style.theme_use() or "default")
+        except Exception:
+            pass
         style.configure("Horizontal.TProgressbar", troughcolor="#021219", background="#2fa360", thickness=18)
 
         # Fonts stored for convenience
@@ -603,7 +701,7 @@ class DDPWipeAgentApp(tk.Tk):
         if is_windows:
             base_command = "powershell.exe -ExecutionPolicy Bypass -Command \"& {{Remove-Item -Path '{}' -Force -Recurse -ErrorAction SilentlyContinue}}\""
         else:
-            base_command = "sudo rm -rf '{}'"
+            base_command = "sudo rm -rf '{}'"  # preview only; we won't rely on this for Linux execution
 
         for path in paths_to_delete:
             target_contents = os.path.join(path, '*')
@@ -633,7 +731,7 @@ class DDPWipeAgentApp(tk.Tk):
             preview_lines.append(f"... and {len(delete_commands) - 8} more folder deletion commands.")
         preview_lines += [
             "",
-            f"# Step 2: Full Secure Wipe (Real Disk Operation - SIMULATED TIME)",
+            f"# Step 2: Full Secure Wipe (Real Disk Operation - SIMULATED Time)",
             f"COMMAND: {wipe_command}",
             "",
             f"# Step 3: Minting Certificate",
@@ -696,7 +794,7 @@ class DDPWipeAgentApp(tk.Tk):
         return f"~{base * max(1,pnum)}s (simulated)"
 
     # -------------------------
-    # Deletion execution (EXACT LOGIC preserved)
+    # Deletion execution (EXACT LOGIC preserved except deletion engine)
     # -------------------------
     def _browse_cert_backup(self):
         path = filedialog.asksaveasfilename(title="Select certificate backup file", defaultextension=".json",
@@ -742,18 +840,25 @@ class DDPWipeAgentApp(tk.Tk):
         is_windows = platform.system() == "Windows"
         all_successful = True
         for i, path in enumerate(paths_to_delete):
+            # log which folder we're operating on
             self.after(0, lambda p=i, total=len(paths_to_delete), f=path: self.logger.debug(f"Executing deletion for folder {p+1}/{total}: {f}"))
-            target_path_contents = os.path.join(path, '*')
+            # we want to delete contents (matching original Windows behavior)
             if is_windows:
+                target_path_contents = os.path.join(path, '*')
+                # use the same command as preview / previous working Windows behavior
                 command = f"powershell.exe -ExecutionPolicy Bypass -Command \"& {{Remove-Item -Path '{target_path_contents}' -Force -Recurse -ErrorAction SilentlyContinue}}\""
+                success, output = self._execute_deletion_command(command)
             else:
-                command = f"sudo rm -rf '{target_path_contents}'"
-            success, output = self._execute_deletion_command(command)
+                # On Linux/macOS, delete contents using shutil/os to avoid quoting/globbing issues.
+                success, output = delete_contents_cross_platform(path, self.logger)
+
             if not success:
                 self.after(0, lambda p=path, o=output: self.logger.error(f"Deletion failed for {p}. Reason: {o}"))
                 all_successful = False
             else:
                 self.after(0, lambda p=path: self.logger.debug(f"Deletion command succeeded for {p}."))
+
+            # Progress chunking (small, unchanged)
             progress_step = int(8 / len(paths_to_delete)) if len(paths_to_delete) > 0 else 8
             self.after(0, lambda prog=2 + (i + 1) * progress_step: self.progress.config(value=min(10, prog)))
             self.after(0, lambda p=i+1, t=len(paths_to_delete): self.progress_label.config(text=f"STEP 1: Deleting Folder {p}/{t}"))
